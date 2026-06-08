@@ -21,13 +21,41 @@ from rich.spinner import SPINNERS, Spinner
 
 
 SPINNERS.update({
-    'blink': {
+    'stream': {
         'interval': 100,
-        'frames': '   ·*·',
+        'frames': [
+            '   ',
+            '   ',
+            '   ',
+            '·  ',
+            '*· ',
+            '**·',
+            '·**',
+            ' ·*',
+            '  ·',
+        ],
     },
-    'snake_6_4': {
+    'pulse': {
         'interval': 100,
-        'frames': '⠧⠏⠛⠹⠼⠶',
+        'frames': [
+            '   ',
+            '   ',
+            '   ',
+            ' · ',
+            ' * ',
+            ' · ',
+        ],
+    },
+    'cycle': {
+        'interval': 100,
+        'frames': [
+            ' ⠧ ',
+            ' ⠏ ',
+            ' ⠛ ',
+            ' ⠹ ',
+            ' ⠼ ',
+            ' ⠶ ',
+        ],
     },
 })
 
@@ -47,14 +75,11 @@ Live = Partial(
 
 
 def watch_signal() -> tuple[Event, Event]:
-    """
-    A factory which creates a threading.Event handling stop signals.
-    """
     signal_event, stop_event = Event(), Event()
 
     def notify_signal() -> None:
         signal_event.wait()
-        with Live(Spinner('grenade', 'Stopping')):
+        with Live(Spinner('cycle', 'Stopping')):
             stop_event.wait()
 
     def handle_signal(*_: Any) -> None:
@@ -64,7 +89,7 @@ def watch_signal() -> tuple[Event, Event]:
         with Suppress(OSError, ValueError):
             signal.signal(s, handle_signal)
 
-    Thread(target=notify_signal, daemon=True).start()
+    Thread(target=notify_signal).start()
     return signal_event, stop_event
 
 
@@ -78,20 +103,27 @@ def spawn(link: str) -> Iterator[str]:
     with Popen(
         ('gallery-dl', link),
         stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
+        stderr=subprocess.PIPE,
         text=True,
     ) as popen:
-        if popen.stdout:
-            for _ in popen.stdout:
-                if signal_event.is_set():
-                    return popen.terminate()
-                yield _.strip()
+        if not popen.stdout or not popen.stderr:
+            return popen.terminate()
+
+        for _ in popen.stdout:
+            if signal_event.is_set():
+                break
+            yield _.strip()
+
+        for _ in popen.stderr:
+            if signal_event.is_set():
+                break
+            yield _.strip()
 
 
 def cycle(*links: str) -> DateTime:
     processed: list[str] = []
 
-    with Live(spinner := Spinner('snake_6_4')) as live:
+    with Live(spinner := Spinner('stream')) as live:
         for a, b in enumerate(links):
             if signal_event.is_set():
                 break
@@ -99,11 +131,12 @@ def cycle(*links: str) -> DateTime:
             for _ in spawn(b):
                 if not _.startswith('#'):
                     live.console.print(_)
-                processed.append(_)
+                if not _.startswith('['):
+                    processed.append(_)
 
     downloaded, skipped, time = (
-        sum(1 for _ in processed if not _.startswith('#')),
-        sum(1 for _ in processed if _.startswith('#')),
+        sum(1 for _ in processed if not _.startswith(('#', '['))),
+        sum(1 for _ in processed if _.startswith(('#', '['))),
         DateTime.now(TimeZone.utc).astimezone(),
     )
 
@@ -131,7 +164,7 @@ def main(*links: str, interval: int = 3600) -> None:
 
     while not signal_event.is_set():
         time = cycle(*links) + TimeDelta(seconds=interval)
-        with Live(spinner := Spinner('blink')):
+        with Live(spinner := Spinner('pulse')):
             spinner.update(text=f'Waiting until {time:%Y-%m-%dT%H:%M:%SZ}.')
             signal_event.wait(interval)
 
