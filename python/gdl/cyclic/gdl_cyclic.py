@@ -1,5 +1,6 @@
 import signal
 import subprocess
+import sys
 from collections import Counter, defaultdict as DefaultDict
 from collections.abc import Iterator
 from contextlib import suppress as Suppress
@@ -65,14 +66,13 @@ def spawn(link: str) -> Iterator[str]:
         if not popen.stdout or not popen.stderr:
             popen.terminate()
             return
-
         for _ in TakeWhile(
           lambda _: not signal_event.is_set(),
           Chain(popen.stdout, popen.stderr)):
             yield _.strip()
 
 
-def cycle(*links: str, time: DateTime) -> None:
+def cycle(links: list[str], time: DateTime, keep_links: bool) -> None:
     items: dict[str, list[str]] = DefaultDict(list)
     with Live(spinner := Spinner('dots')):
         for a, b in TakeWhile(
@@ -80,18 +80,21 @@ def cycle(*links: str, time: DateTime) -> None:
           enumerate(links)):
             spinner.update(text=f'[{a + 1}/{len(links)}] {b}')
             for c in spawn(b):
-                if (d := c[0]) in ('.', '#', '['):
-                    items[d].append(c)
+                items[(d := c[0])].append(c)
+                if d == '[' and not keep_links:
+                    links.remove(b)
+                    break
                 if d != '#':
                     console.print(c)
 
     downloads, skips, errors = (
       len(items['.']), len(items['#']), len(items['[']))
 
-    if not downloads and not skips and errors:
+    if not (downloads or skips) and errors:
         console.print('! All provided links failed.')
-        stop_event.set()
-        return
+        if not links:
+            stop_event.set()
+            return
 
     console.print(
       f'[{time.astimezone():%Y-%m-%dT%H:%M:%SZ}] {downloads + skips} items '
@@ -99,32 +102,46 @@ def cycle(*links: str, time: DateTime) -> None:
       sep='\n')
 
 
-def main(*links: str, interval: int = 1800) -> None:
+def main(
+  *links: str,
+  interval: int = 1800,
+  keep_links: bool = False) -> None:
     """
     Routinely runs gallery-dl while omitting unnecessary console printing.
     Args:
-        interval: How many seconds to wait with each gallery-dl run.
+        interval: Wait this many seconds with each gallery-dl run.
+        keep_links: Do not remove links when gallery-dl reports errors.
     """
-    if not links:
+    _links = list(links)
+    if not _links:
         console.print('! No links were provided.')
         stop_event.set()
         return
 
-    counter = Counter(links)
+    counter = Counter(_links)
     if any(_ > 1 for _ in counter.values()):
-        links = tuple(counter.keys())
+        _links = list(counter.keys())
         console.print('* Duplicates found, sanitised links:')
-        console.print(*links, sep='\n', end='\n' * 2)
+        console.print(*_links, sep='\n', end='\n' * 2)
 
-    while not signal_event.is_set():
-        cycle(*links, time=(time := DateTime.now()))
+    while _links and not signal_event.is_set():
+        cycle(_links, time := DateTime.now(), keep_links)
         time += TimeDelta(seconds=interval)
         with Live(Spinner('dots', f'Waiting until {time:%H:%M:%S}')):
-            while not signal_event.is_set() and time > DateTime.now():
+            while all((
+                  not signal_event.is_set(),
+                  time > DateTime.now(),
+                  _links)):
                 signal_event.wait(1)
 
     stop_event.set()
 
 
 if __name__ == '__main__':
-    Fire(main)
+    if not len(sys.argv[1:]):
+        sys.argv.append('--help')
+
+    try:
+        Fire(main)
+    except SystemExit:
+        stop_event.set()
